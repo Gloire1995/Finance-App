@@ -1,0 +1,102 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const app = express();
+
+// --- CONFIGURATION ---
+app.use(express.urlencoded({ extended: true }));
+app.use(session({ secret: 'finance_secret_123', resave: false, saveUninitialized: true }));
+
+// --- DATABASE SCHEMA ---
+const UserSchema = new mongoose.Schema({
+    email: { type: String, unique: true, required: true },
+    password: { type: String, required: true },
+    balance: { type: Number, default: 0 },         // Regular balance
+    lockedBalance: { type: Number, default: 0 },   // Deposit + 20% Bonus
+    unlockDate: { type: Date }
+});
+const User = mongoose.model('User', UserSchema);
+
+// --- HTML INTERFACE (Embedded) ---
+const layout = (body) => `
+    <html><body style="font-family: sans-serif; padding: 20px;">
+    <nav><a href="/dashboard">Dashboard</a> | <a href="/admin">Admin Panel</a> | <a href="/logout">Logout</a></nav>
+    <hr/>${body}</body></html>`;
+
+// --- ROUTES ---
+
+// Login Page
+app.get('/', (req, res) => {
+    res.send(layout(`
+        <h2>Login / Register</h2>
+        <form action="/login" method="POST">
+            <input type="email" name="email" placeholder="Email" required><br><br>
+            <input type="password" name="password" placeholder="Password" required><br><br>
+            <button type="submit">Login / Register</button>
+        </form>
+    `));
+});
+
+// Logic: Login & Auto-Register
+app.post('/login', async (req, res) => {
+    const { email, password } = req.body;
+    let user = await User.findOne({ email });
+    if (!user) {
+        const hashed = await bcrypt.hash(password, 10);
+        user = await User.create({ email, password: hashed });
+    }
+    const match = await bcrypt.compare(password, user.password);
+    if (match) {
+        req.session.userId = user._id;
+        res.redirect('/dashboard');
+    } else { res.send("Wrong password. <a href='/'>Try again</a>"); }
+});
+
+// User Dashboard
+app.get('/dashboard', async (req, res) => {
+    if (!req.session.userId) return res.redirect('/');
+    const user = await User.findById(req.session.userId);
+    const canWithdraw = user.unlockDate && new Date() > user.unlockDate;
+
+    res.send(layout(`
+        <h1>Welcome, ${user.email}</h1>
+        <div style="background: #f4f4f4; padding: 15px; border-radius: 8px;">
+            <p><b>Available Balance:</b> $${user.balance}</p>
+            <p><b>Locked Balance (inc. 20% Bonus):</b> $${user.lockedBalance}</p>
+            <p><b>Unlock Date:</b> ${user.unlockDate ? user.unlockDate.toDateString() : 'No pending lock'}</p>
+        </div>
+        ${canWithdraw ? '<button style="color:green">Withdraw Unlocked Funds</button>' : '<p style="color:red">Funds are locked for 30 days.</p>'}
+    `));
+});
+
+// Admin Panel (Where you credit the 20%)
+app.get('/admin', (req, res) => {
+    res.send(layout(`
+        <h1>Admin Control</h1>
+        <form action="/admin/credit" method="POST">
+            <p>User Email:</p><input type="email" name="userEmail" required>
+            <p>Deposit Amount:</p><input type="number" name="amount" required>
+            <button type="submit" style="background: blue; color: white;">Credit Deposit + 20% Bonus</button>
+        </form>
+    `));
+});
+
+app.post('/admin/credit', async (req, res) => {
+    const { userEmail, amount } = req.body;
+    const bonus = Number(amount) * 0.20;
+    const totalToLock = Number(amount) + bonus;
+
+    await User.findOneAndUpdate({ email: userEmail }, {
+        $inc: { lockedBalance: totalToLock },
+        $set: { unlockDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } 
+    });
+    res.send("Successfully credited. <a href='/admin'>Go back</a>");
+});
+
+app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/'); });
+
+// --- START SERVER ---
+mongoose.connect(process.env.MONGO_URI).then(() => {
+    app.listen(process.env.PORT || 3000, () => console.log("Server Live"));
+});
