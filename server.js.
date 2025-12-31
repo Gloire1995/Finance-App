@@ -6,78 +6,86 @@ const app = express();
 
 // --- CONFIGURATION ---
 app.use(express.urlencoded({ extended: true }));
-app.use(session({ secret: 'finance_secret_123', resave: false, saveUninitialized: true }));
+app.use(session({ 
+    secret: process.env.SESSION_SECRET || 'fallback_secret', 
+    resave: false, 
+    saveUninitialized: true 
+}));
 
 // --- DATABASE SCHEMA ---
 const UserSchema = new mongoose.Schema({
     email: { type: String, unique: true, required: true },
     password: { type: String, required: true },
-    balance: { type: Number, default: 0 },         // Regular balance
-    lockedBalance: { type: Number, default: 0 },   // Deposit + 20% Bonus
+    balance: { type: Number, default: 0 },
+    lockedBalance: { type: Number, default: 0 },
     unlockDate: { type: Date }
 });
 const User = mongoose.model('User', UserSchema);
 
-// --- HTML INTERFACE (Embedded) ---
+// --- HTML LAYOUT ---
 const layout = (body) => `
-    <html><body style="font-family: sans-serif; padding: 20px;">
-    <nav><a href="/dashboard">Dashboard</a> | <a href="/admin">Admin Panel</a> | <a href="/logout">Logout</a></nav>
-    <hr/>${body}</body></html>`;
+    <html><body style="font-family: sans-serif; padding: 20px; background: #f0f2f5;">
+    <nav style="background: #fff; padding: 10px; border-radius: 8px; margin-bottom: 20px;">
+        <a href="/dashboard">Dashboard</a> | <a href="/admin">Admin Panel</a> | <a href="/logout">Logout</a>
+    </nav>
+    <div style="background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+        ${body}
+    </div></body></html>`;
 
 // --- ROUTES ---
 
-// Login Page
 app.get('/', (req, res) => {
     res.send(layout(`
         <h2>Login / Register</h2>
         <form action="/login" method="POST">
-            <input type="email" name="email" placeholder="Email" required><br><br>
-            <input type="password" name="password" placeholder="Password" required><br><br>
-            <button type="submit">Login / Register</button>
+            <input type="email" name="email" placeholder="Email" style="padding:10px; width:100%;" required><br><br>
+            <input type="password" name="password" placeholder="Password" style="padding:10px; width:100%;" required><br><br>
+            <button type="submit" style="padding:10px 20px; background: #007bff; color: white; border: none; border-radius: 5px;">Enter App</button>
         </form>
     `));
 });
 
-// Logic: Login & Auto-Register
 app.post('/login', async (req, res) => {
-    const { email, password } = req.body;
-    let user = await User.findOne({ email });
-    if (!user) {
-        const hashed = await bcrypt.hash(password, 10);
-        user = await User.create({ email, password: hashed });
-    }
-    const match = await bcrypt.compare(password, user.password);
-    if (match) {
-        req.session.userId = user._id;
-        res.redirect('/dashboard');
-    } else { res.send("Wrong password. <a href='/'>Try again</a>"); }
+    try {
+        const { email, password } = req.body;
+        let user = await User.findOne({ email });
+        if (!user) {
+            const hashed = await bcrypt.hash(password, 10);
+            user = await User.create({ email, password: hashed });
+        }
+        const match = await bcrypt.compare(password, user.password);
+        if (match) {
+            req.session.userId = user._id;
+            res.redirect('/dashboard');
+        } else { res.send("Wrong password. <a href='/'>Try again</a>"); }
+    } catch (err) { res.status(500).send("Login Error: " + err.message); }
 });
 
-// User Dashboard
 app.get('/dashboard', async (req, res) => {
     if (!req.session.userId) return res.redirect('/');
     const user = await User.findById(req.session.userId);
-    const canWithdraw = user.unlockDate && new Date() > user.unlockDate;
+    const now = new Date();
+    const isUnlocked = user.unlockDate && now > user.unlockDate;
 
     res.send(layout(`
-        <h1>Welcome, ${user.email}</h1>
-        <div style="background: #f4f4f4; padding: 15px; border-radius: 8px;">
+        <h1>Dashboard</h1>
+        <p>User: <b>${user.email}</b></p>
+        <div style="border: 1px solid #ddd; padding: 15px; margin-bottom: 10px;">
             <p><b>Available Balance:</b> $${user.balance}</p>
-            <p><b>Locked Balance (inc. 20% Bonus):</b> $${user.lockedBalance}</p>
-            <p><b>Unlock Date:</b> ${user.unlockDate ? user.unlockDate.toDateString() : 'No pending lock'}</p>
+            <p style="color: blue;"><b>Locked Balance (+20% Bonus):</b> $${user.lockedBalance}</p>
+            <p><b>Unlock Date:</b> ${user.unlockDate ? user.unlockDate.toDateString() : 'No pending deposits'}</p>
         </div>
-        ${canWithdraw ? '<button style="color:green">Withdraw Unlocked Funds</button>' : '<p style="color:red">Funds are locked for 30 days.</p>'}
+        ${isUnlocked ? '<button style="background:green; color:white; padding:10px;">Withdraw Now</button>' : '<p style="color:red;">Tokens are locked for 30 days.</p>'}
     `));
 });
 
-// Admin Panel (Where you credit the 20%)
 app.get('/admin', (req, res) => {
     res.send(layout(`
-        <h1>Admin Control</h1>
+        <h2>Admin: Credit User</h2>
         <form action="/admin/credit" method="POST">
-            <p>User Email:</p><input type="email" name="userEmail" required>
-            <p>Deposit Amount:</p><input type="number" name="amount" required>
-            <button type="submit" style="background: blue; color: white;">Credit Deposit + 20% Bonus</button>
+            <input type="email" name="userEmail" placeholder="User Email" style="padding:10px; width:100%;" required><br><br>
+            <input type="number" name="amount" placeholder="Deposit Amount" style="padding:10px; width:100%;" required><br><br>
+            <button type="submit" style="background: black; color: white; padding: 10px 20px;">Credit 20% Compensation</button>
         </form>
     `));
 });
@@ -85,18 +93,33 @@ app.get('/admin', (req, res) => {
 app.post('/admin/credit', async (req, res) => {
     const { userEmail, amount } = req.body;
     const bonus = Number(amount) * 0.20;
-    const totalToLock = Number(amount) + bonus;
+    const total = Number(amount) + bonus;
+    const release = new Date();
+    release.setDate(release.getDate() + 30); // ADD 30 DAYS
 
     await User.findOneAndUpdate({ email: userEmail }, {
-        $inc: { lockedBalance: totalToLock },
-        $set: { unlockDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } 
+        $inc: { lockedBalance: total },
+        $set: { unlockDate: release }
     });
-    res.send("Successfully credited. <a href='/admin'>Go back</a>");
+    res.send(`Successfully credited $${total} to ${userEmail}. <a href='/admin'>Back</a>`);
 });
 
 app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/'); });
 
-// --- START SERVER ---
-mongoose.connect(process.env.MONGO_URI).then(() => {
-    app.listen(process.env.PORT || 3000, () => console.log("Server Live"));
-});
+// --- CONNECT TO DB WITH ERROR LOGGING ---
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+    console.error("CRITICAL ERROR: MONGO_URI is missing in Render Environment Variables!");
+    process.exit(1);
+}
+
+mongoose.connect(MONGO_URI)
+    .then(() => {
+        console.log("SUCCESS: Connected to MongoDB Atlas");
+        app.listen(process.env.PORT || 3000, () => console.log("SUCCESS: Server is Live on Port 3000"));
+    })
+    .catch((err) => {
+        console.error("DATABASE CONNECTION ERROR: ", err.message);
+        process.exit(1); // This triggers the Status 1 error, but now it tells us why.
+    });
